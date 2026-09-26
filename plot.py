@@ -1,17 +1,25 @@
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["matplotlib"]
+# dependencies = ["matplotlib", "numpy"]
 # ///
 
 """
-Draw ten years of Taiwan earthquakes as tree rings.
+Draw ten years of Taiwan earthquakes as tree rings -- each ring a solid
+silhouette, spiking up sharply on the day of an earthquake and settling back
+down slowly afterwards, the way real aftershock sequences actually decay.
 
-One ring per year, 2016 innermost and 2025 outermost -- the way a real tree
-grows outward from its centre. The width of each ring is how much seismic
-energy that year released (log-scaled, or 2024's magnitude-7.4 sequence
-would swallow every other year). Every earthquake is a scar on its year's
-ring: its angle is the month it happened in (January at the top, like a
-clock), its size is the magnitude, and its colour is how deep it was.
+That shape is not invented for effect. Real aftershock rates follow Omori's
+law: roughly proportional to 1/(t + c)^p, where t is days since the main
+shock -- a near-vertical rise on the day itself, then a long, slowly
+flattening tail. A year with one clean rupture makes one clean spike; a year
+with several sequences makes several, overlapping if they are close together.
+
+One ring per year, 2016 innermost and 2025 outermost. Two things vary:
+
+  - the SHAPE of the ring -- spikes where a bigger earthquake happened,
+    spike height set by magnitude, spike decay following Omori's law
+  - the COLOUR of the whole ring -- that year's average depth, warm for
+    shallow, cool for deep
 
 Run it:
 
@@ -21,11 +29,13 @@ This only reads out/quakes-by-year.csv and out/quakes-events.csv -- both
 written by explore.py. It never touches data/ or the network.
 """
 
+import calendar
 import csv
 import math
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 
 HERE = Path(__file__).parent
 YEARLY = HERE / "out" / "quakes-by-year.csv"
@@ -36,23 +46,22 @@ OUTPUT = HERE / "out" / "tree-rings.png"
 # The knobs.
 # ---------------------------------------------------------------------------
 
-PITH_RADIUS = 1.0        # radius of the empty centre, like the tree's core
-MIN_RING_WIDTH = 0.6      # a quiet year still gets a visible ring
-MAX_RING_WIDTH = 1.8      # the busiest year (2024) caps out here
+PITH_RADIUS = 1.0          # radius of the empty centre, like the tree's core
+RADIAL_STEP = 1.6          # centre-to-centre distance between consecutive years
+BASELINE_THICKNESS = 0.12  # the ring's resting thickness with no earthquake
+SPIKE_AMPLITUDE = 1.3      # how far the single biggest possible day swells the ring
+ROUNDING_DAYS = 3          # blurs the peak's tip and the sawtooth tail into a smooth curve
 
-MIN_MARKER_SIZE = 20      # smallest scar (a magnitude-3.5 quake)
-MAX_MARKER_SIZE = 220     # largest scar (the magnitude-7.4 quake)
+# Omori's law: aftershock rate ~ 1 / (t + OMORI_C) ** OMORI_P, t in days
+# since the event. A few days' width, not a fraction of one, or the peak
+# is a single-pixel needle instead of a readable mountain shape.
+OMORI_C = 4.0
+OMORI_P = 1.05
 
-# Three depth bands instead of one continuous colour scale -- with most
-# quakes shallow and a handful very deep, a continuous scale would crowd
-# almost every point into one end of it.
-DEPTH_BANDS = [
-    (30, "#e6550d", "shallow (<30 km)"),
-    (70, "#3182bd", "mid (30-70 km)"),
-    (float("inf"), "#756bb1", "deep (>70 km)"),
-]
+CURVE_RESOLUTION = 2000    # points used to draw the curve smoothly
 
-RING_COLOURS = ["#d9c19a", "#c9ac7c"]   # alternate light/dark, like earlywood/latewood
+DEPTH_COLOUR_CAP_KM = 100  # depths beyond this are drawn the same colour as the cap
+CMAP = plt.get_cmap("coolwarm_r")   # reversed: shallow (low km) -> warm/red, deep -> cool/blue
 
 # ---------------------------------------------------------------------------
 # Reading the trimmed data. fetch.py and explore.py already did the work.
@@ -73,50 +82,58 @@ def load_events():
         rows = list(csv.DictReader(handle))
     for row in rows:
         row["year"] = int(row["year"])
-        row["month"] = int(row["month"])
+        row["doy"] = int(row["doy"])
         row["mag"] = float(row["mag"])
         row["depth_km"] = float(row["depth_km"])
     return rows
 
 
 # ---------------------------------------------------------------------------
-# Turning numbers into radii, sizes and colours.
+# Building one year's silhouette: a sharp rise on the day of each earthquake,
+# an Omori-law tail afterwards, the tallest event winning wherever two
+# sequences overlap.
 # ---------------------------------------------------------------------------
 
 
-def ring_widths(yearly):
-    """Normalise log(energy) into the MIN_RING_WIDTH..MAX_RING_WIDTH range."""
-    logs = [math.log10(row["total_energy_joules"]) for row in yearly]
-    low, high = min(logs), max(logs)
-    widths = {}
-    for row, log_energy in zip(yearly, logs):
-        fraction = (log_energy - low) / (high - low)
-        widths[row["year"]] = MIN_RING_WIDTH + fraction * (MAX_RING_WIDTH - MIN_RING_WIDTH)
-    return widths
+def smooth_circular(values, window):
+    """A Gaussian-weighted average that wraps around, so the smoothing has
+    no seam where the ring closes on itself."""
+    sigma = window / 3
+    half = max(1, window * 2)
+    offsets = np.arange(-half, half + 1)
+    kernel = np.exp(-(offsets ** 2) / (2 * sigma ** 2))
+    kernel /= kernel.sum()
+    padded = np.concatenate([values[-half:], values, values[:half]])
+    smoothed = np.convolve(padded, kernel, mode="same")
+    return smoothed[half:half + len(values)]
 
 
-def ring_boundaries(yearly, widths):
-    """Each year's (inner_radius, outer_radius), stacked from the pith outward."""
-    boundaries = {}
-    radius = PITH_RADIUS
-    for row in yearly:
-        year = row["year"]
-        boundaries[year] = (radius, radius + widths[year])
-        radius += widths[year]
-    return boundaries
+def year_silhouette(year_events, n_days, global_max_mag):
+    fine_days = np.linspace(0, n_days, CURVE_RESOLUTION, endpoint=False)
+    envelope = np.zeros(CURVE_RESOLUTION)
+
+    for e in year_events:
+        peak_height = (e["mag"] / global_max_mag) * SPIKE_AMPLITUDE
+        # Forward-only distance in days, wrapping around the circle, so an
+        # event late in the year still decays smoothly rather than jumping.
+        t = (fine_days - e["doy"]) % n_days
+        decay = peak_height / (1 + t / OMORI_C) ** OMORI_P
+        envelope = np.maximum(envelope, decay)
+
+    # Round off the peak's tip and the sawtooth left by many overlapping
+    # aftershock curves, without erasing the day-to-day shape entirely.
+    samples_per_day = CURVE_RESOLUTION / n_days
+    envelope = smooth_circular(envelope, max(3, round(ROUNDING_DAYS * samples_per_day)))
+
+    return fine_days, envelope
 
 
-def marker_size(mag, all_mags):
-    low, high = min(all_mags), max(all_mags)
-    fraction = (mag - low) / (high - low)
-    return MIN_MARKER_SIZE + fraction * (MAX_MARKER_SIZE - MIN_MARKER_SIZE)
-
-
-def depth_colour(depth_km):
-    for limit, colour, _label in DEPTH_BANDS:
-        if depth_km < limit:
-            return colour
-    return DEPTH_BANDS[-1][1]
+def year_colour(year_events):
+    if not year_events:
+        return CMAP(0.0)
+    mean_depth = sum(e["depth_km"] for e in year_events) / len(year_events)
+    fraction = min(mean_depth, DEPTH_COLOUR_CAP_KM) / DEPTH_COLOUR_CAP_KM
+    return CMAP(fraction)
 
 
 # ---------------------------------------------------------------------------
@@ -124,53 +141,49 @@ def depth_colour(depth_km):
 # ---------------------------------------------------------------------------
 
 
-def draw(yearly, events):
-    widths = ring_widths(yearly)
-    boundaries = ring_boundaries(yearly, widths)
-    all_mags = [e["mag"] for e in events]
-
+def draw(yearly, events_by_year, global_max_mag):
     fig, ax = plt.subplots(figsize=(9, 9), subplot_kw={"projection": "polar"})
-    ax.set_theta_zero_location("N")   # January points straight up
-    ax.set_theta_direction(-1)        # months run clockwise, like a clock face
+    ax.set_theta_zero_location("N")   # Jan 1 points straight up
+    ax.set_theta_direction(-1)        # the year runs clockwise, like a clock face
 
-    theta = [t / 200 * 2 * math.pi for t in range(201)]   # a full circle, densely sampled
-
-    # One filled ring per year.
     for i, row in enumerate(yearly):
-        inner, outer = boundaries[row["year"]]
-        ax.fill_between(theta, inner, outer, color=RING_COLOURS[i % 2], zorder=1)
+        year = row["year"]
+        year_events = events_by_year.get(year, [])
+        n_days = 366 if calendar.isleap(year) else 365
 
-    # One scar per earthquake, on top of its year's ring.
-    for band_limit, colour, label in DEPTH_BANDS:
-        band_events = [e for e in events if depth_colour(e["depth_km"]) == colour]
-        if not band_events:
-            continue
-        angles = [e["month"] / 12 * 2 * math.pi for e in band_events]
-        radii = [sum(boundaries[e["year"]]) / 2 for e in band_events]   # middle of the ring
-        sizes = [marker_size(e["mag"], all_mags) for e in band_events]
-        ax.scatter(angles, radii, s=sizes, color=colour, alpha=0.85,
-                   edgecolor="black", linewidth=0.3, zorder=2, label=label)
+        fine_days, envelope = year_silhouette(year_events, n_days, global_max_mag)
+        theta = fine_days / n_days * 2 * math.pi
 
-    # Year labels, one per ring, placed at the 6 o'clock gap so they don't
-    # collide with the scars.
-    for row in yearly:
-        inner, outer = boundaries[row["year"]]
-        ax.text(math.pi, (inner + outer) / 2, str(row["year"]),
-                ha="center", va="center", fontsize=8, color="#4a3520",
+        centre_radius = PITH_RADIUS + RADIAL_STEP / 2 + i * RADIAL_STEP
+        half_thickness = BASELINE_THICKNESS / 2 + envelope / 2
+        inner = centre_radius - half_thickness
+        outer = centre_radius + half_thickness
+
+        colour = year_colour(year_events)
+        ax.fill_between(theta, inner, outer, color=colour, zorder=1,
+                        edgecolor="#3a2a18", linewidth=0.3)
+
+        ax.text(math.pi, centre_radius, str(year), ha="center", va="center",
+                fontsize=8, color="#4a3520",
                 bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.75, "pad": 1.5})
 
-    ax.set_ylim(0, PITH_RADIUS + sum(widths.values()) + 0.5)
-    ax.set_yticklabels([])            # radius numbers would not mean anything to a reader
-    ax.set_xticklabels([])            # month numbers instead of names would need explaining
+    max_radius = PITH_RADIUS + RADIAL_STEP * len(yearly) + SPIKE_AMPLITUDE + 0.3
+    ax.set_ylim(0, max_radius)
+    ax.set_yticklabels([])
+    ax.set_xticklabels([])
     ax.spines["polar"].set_visible(False)
     ax.grid(False)
     ax.set_facecolor("white")
 
-    ax.legend(loc="upper right", bbox_to_anchor=(1.25, 1.1), title="depth",
-              fontsize=8, title_fontsize=9, frameon=False)
+    sm = plt.cm.ScalarMappable(cmap=CMAP, norm=plt.Normalize(vmin=0, vmax=DEPTH_COLOUR_CAP_KM))
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=ax, fraction=0.035, pad=0.08)
+    cbar.set_label(f"mean depth (km, capped at {DEPTH_COLOUR_CAP_KM})", fontsize=8)
+
     ax.set_title("Ten years of Taiwan earthquakes, as tree rings\n"
-                  "ring width = that year's seismic energy - scar size = magnitude",
-                  fontsize=11, pad=20)
+                  "spike height = magnitude · spike decay = Omori's law · "
+                  "colour = that year's mean depth",
+                  fontsize=10.5, pad=24)
 
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(OUTPUT, dpi=200, bbox_inches="tight")
@@ -181,7 +194,14 @@ def draw(yearly, events):
 def main():
     yearly = load_yearly()
     events = load_events()
-    draw(yearly, events)
+
+    events_by_year = {}
+    for e in events:
+        events_by_year.setdefault(e["year"], []).append(e)
+
+    global_max_mag = max(e["mag"] for e in events)
+
+    draw(yearly, events_by_year, global_max_mag)
 
 
 if __name__ == "__main__":

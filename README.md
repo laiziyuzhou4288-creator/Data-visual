@@ -1,34 +1,23 @@
-# The phenomenon
+# Ten years of Taiwan earthquakes, as tree rings
 
-<!-- This is the SD5913 assignment 2 template. Everything in this file is yours to
-replace, and the check counts words: comments like this one are not words, so
-delete each one as you write. Start with the heading: name the phenomenon.
-
-Then, in this order, at least 150 words in total.
-
-New to folders, paths, or the files here whose names start with a dot? Read
-https://github.com/sd5913/pfad/blob/2026/reference/files.md first. Ten minutes. -->
-
-![what the picture is](out/plot.png)
+![ten years of Taiwan earthquakes as tree rings](out/tree-rings.png)
 
 ## The phenomenon
 
-<!-- What goes up and down, and why you looked at it. -->
+Taiwan sits where the Philippine Sea Plate slides under the Eurasian Plate. The ground there moves every day, and the USGS records every earthquake above magnitude 3.5 in a public file. I looked at ten years of that file — 2016 to 2025 — because I wanted to see whether a year with one big earthquake looks different from a year with many small ones. The picture turns each year into a tree ring: a year with a big earthquake makes a tall spike, and the spike decays the way real aftershock sequences decay.
 
 ## The source
 
-<!-- A link to the page or endpoint the file came from, and one line on what is in
-the file: how many rows, what a row means, what the units are. -->
+The file is `data/quakes-taiwan-2016-01-01-to-2025-12-31.geojson`, fetched once from the USGS Earthquake Hazards Program:
+
+<https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson&starttime=2016-01-01&endtime=2025-12-31&minmagnitude=3.5&minlatitude=21.0&maxlatitude=26.0&minlongitude=119.0&maxlongitude=123.0>
+
+It holds 1,765 earthquakes, each one a point with a magnitude (a number, no units), a depth in kilometres, a longitude, a latitude and a time. `fetch.py` writes the raw reply unchanged into `data/`. `explore.py` reads it and writes two trimmed CSVs into `out/`: one row per year, and one row per earthquake. `plot.py` reads only those CSVs.
 
 ## What the picture shows
 
-<!-- Two or three sentences. Including what it hides: every transformation throws
-something away, and naming what yours threw away is the easiest way to sound like
-you know what you did. -->
+Each ring is one year, 2016 innermost and 2025 outermost. The height of a bump is that earthquake's magnitude, and the long tail after each bump follows Omori's law — the same shape real aftershock sequences have. Colour is that year's mean depth, warm for shallow and cool for deep.
+
+What it hides: the position of every earthquake is thrown away. Two earthquakes with the same magnitude and depth look identical on the ring, even if one happened under Hualien and the other under Yujing. The picture answers "when and how strong", not "where". It also caps depth colour at 100 km, so anything deeper looks the same as 100 km.
 
 ## Run it
-
-```
-uv run fetch.py
-uv run plot.py
-```

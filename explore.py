@@ -45,6 +45,7 @@ def load_events():
         events.append({
             "year": when.year,
             "month": when.month,
+            "doy": when.timetuple().tm_yday,   # day of year: Jan 1 = 1, Dec 31 = 365/366
             "mag": props["mag"],
             "depth_km": depth_km,
             "sig": props["sig"],
