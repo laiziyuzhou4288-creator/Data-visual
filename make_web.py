@@ -1,169 +1,79 @@
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["plotly"]
+# dependencies = ["matplotlib", "numpy"]
 # ///
 
 """
-Build a static HTML page from the earthquake tree-ring data.
+Build the interactive HTML page for the Taiwan earthquake tree rings.
 
-This is step one: just the picture, no interaction yet.  Run it:
+Run it:
 
     uv run make_web.py
 
 It writes site/index.html -- open that file in a browser.
+
+The SVG comes from the same build_figure() that plot.py uses, so the
+picture is identical. We inline the SVG (not <object>) so JavaScript can
+reach each ring <g>, tag the rings with data-year, and wire up hover,
+tooltip, and the year selector.
 """
 
-import calendar
-import csv
-import datetime as dt
-import math
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+import json
+import re
 from pathlib import Path
 
-import plotly.graph_objects as go
+from plot import WOOD_BG, build_figure, load_events, load_yearly
 
 HERE = Path(__file__).parent
-YEARLY = HERE / "out" / "quakes-by-year.csv"
-EVENTS = HERE / "out" / "quakes-events.csv"
 SITE = HERE / "site"
 OUTPUT = SITE / "index.html"
-
-# ---------------------------------------------------------------------------
-# Knobs (match plot.py as closely as Plotly allows).
-# ---------------------------------------------------------------------------
-
-PITH_RADIUS = 1.0
-RADIAL_STEP = 2.0
-THICKNESS_MIN = 0.6         # quietest year
-THICKNESS_MAX = 2.4         # busiest year
-SPIKE_MAX = 1.2             # extra radius at a full-strength spike
-
-OMORI_C = 4.0
-OMORI_P = 1.05
-ROUNDING_DAYS = 3
-CURVE_RESOLUTION = 720      # one point every half a degree; enough for the web
-
-DEPTH_COLOUR_CAP_KM = 100
-
-# Taiwan silhouette, same 8 compass points as plot.py.
-TAIWAN_SHAPE = {
-    0:             1.00,
-    math.pi / 4:   1.06,
-    math.pi / 2:   1.15,
-    3 * math.pi / 4: 1.08,
-    math.pi:       1.20,
-    5 * math.pi / 4: 1.03,
-    3 * math.pi / 2: 0.97,
-    7 * math.pi / 4: 0.97,
-}
+SVG = SITE / "tree-rings.svg"
 
 
-def taiwan_radius(theta):
-    angles = sorted(TAIWAN_SHAPE.keys())
-    radii = [TAIWAN_SHAPE[a] for a in angles]
-    angles_ext = angles + [a + 2 * math.pi for a in angles]
-    radii_ext = radii + radii
-    # Simple linear interpolation, good enough for the web view.
-    t = theta % (2 * math.pi)
-    for i in range(len(angles_ext) - 1):
-        if angles_ext[i] <= t <= angles_ext[i + 1]:
-            a0, a1 = angles_ext[i], angles_ext[i + 1]
-            r0, r1 = radii_ext[i], radii_ext[i + 1]
-            return r0 + (r1 - r0) * (t - a0) / (a1 - a0)
-    return 1.0
-
-
-# ---------------------------------------------------------------------------
-# Reading the data.
-# ---------------------------------------------------------------------------
-
-
-def load_yearly():
-    with YEARLY.open(encoding="utf-8") as handle:
-        rows = list(csv.DictReader(handle))
-    for row in rows:
-        row["year"] = int(row["year"])
-        row["total_energy_joules"] = float(row["total_energy_joules"])
-    return sorted(rows, key=lambda r: r["year"])
-
-
-def load_events():
-    with EVENTS.open(encoding="utf-8") as handle:
-        rows = list(csv.DictReader(handle))
-    for row in rows:
-        row["year"] = int(row["year"])
-        row["doy"] = int(row["doy"])
-        row["mag"] = float(row["mag"])
-        row["depth_km"] = float(row["depth_km"])
-    return rows
-
-
-# ---------------------------------------------------------------------------
-# Building the rings.
-# ---------------------------------------------------------------------------
-
-
-def smooth_circular(values, window):
-    sigma = window / 3
-    half = max(1, window * 2)
-    n = len(values)
-    kernel = []
-    total = 0.0
-    for k in range(-half, half + 1):
-        w = math.exp(-(k * k) / (2 * sigma * sigma))
-        kernel.append(w)
-        total += w
-    kernel = [w / total for w in kernel]
-    out = [0.0] * n
-    for i in range(n):
-        s = 0.0
-        for k, w in zip(range(-half, half + 1), kernel):
-            s += values[(i + k) % n] * w
-        out[i] = s
-    return out
-
-
-def year_envelope(year_events, n_days, global_max_mag):
-    fine = [i * n_days / CURVE_RESOLUTION for i in range(CURVE_RESOLUTION)]
-    env = [0.0] * CURVE_RESOLUTION
-    for e in year_events:
-        peak = e["mag"] / global_max_mag
-        for i, day in enumerate(fine):
-            t = (day - e["doy"]) % n_days
-            v = peak / (1 + t / OMORI_C) ** OMORI_P
-            if v > env[i]:
-                env[i] = v
-    samples_per_day = CURVE_RESOLUTION / n_days
-    return fine, smooth_circular(env, max(3, round(ROUNDING_DAYS * samples_per_day)))
-
-
-def base_thickness(yearly):
-    ranked = sorted(yearly, key=lambda r: r["total_energy_joules"])
-    n = len(ranked)
+def year_summary(yearly, events_by_year):
+    """A dict of {year: {count, max_mag, mean_depth_km}} for the tooltip."""
     out = {}
-    for rank, row in enumerate(ranked):
-        frac = rank / (n - 1) if n > 1 else 0
-        out[row["year"]] = THICKNESS_MIN + frac * (THICKNESS_MAX - THICKNESS_MIN)
+    for row in yearly:
+        year = row["year"]
+        evs = events_by_year.get(year, [])
+        if evs:
+            max_mag = max(e["mag"] for e in evs)
+            mean_depth = sum(e["depth_km"] for e in evs) / len(evs)
+        else:
+            max_mag = 0.0
+            mean_depth = 0.0
+        out[year] = {
+            "count": len(evs),
+            "max_mag": round(max_mag, 1),
+            "mean_depth_km": round(mean_depth, 1),
+        }
     return out
 
 
-# Colour: pale cream (shallow) to deep brown (deep).
-def depth_colour(depth_km):
-    frac = min(depth_km, DEPTH_COLOUR_CAP_KM) / DEPTH_COLOUR_CAP_KM
-    # Start:  #f0e0bc  ->  End: #5a4022
-    def lerp(a, b, t):
-        return round(a + (b - a) * t)
-    r = lerp(0xf0, 0x5a, frac)
-    g = lerp(0xe0, 0x40, frac)
-    b = lerp(0xbc, 0x22, frac)
-    return f"rgb({r},{g},{b})"
+def inline_svg_with_years(svg_path, years):
+    """Read the SVG matplotlib wrote, tag each ring <g> with data-year,
+    and return just the <svg>...</svg> body so it can be pasted into the
+    HTML directly (which is what lets JS see the rings)."""
+    text = svg_path.read_text(encoding="utf-8")
+
+    def add_year(match):
+        idx = int(match.group(1)) - 1
+        year = years[idx] if 0 <= idx < len(years) else ""
+        return f'<g id="LineCollection_{match.group(1)}" data-year="{year}"'
+
+    text = re.sub(r'<g id="LineCollection_(\d+)"', add_year, text)
+
+    start = text.find("<svg")
+    end = text.rfind("</svg>") + len("</svg>")
+    return text[start:end]
 
 
-# ---------------------------------------------------------------------------
-# Building the Plotly figure.
-# ---------------------------------------------------------------------------
-
-
-def build_figure():
+def main():
     yearly = load_yearly()
     events = load_events()
 
@@ -173,100 +83,303 @@ def build_figure():
 
     global_max_mag = max(e["mag"] for e in events)
 
-    thickness = base_thickness(yearly)
+    fig = build_figure(yearly, events_by_year, global_max_mag)
 
-    fig = go.Figure()
+    SITE.mkdir(parents=True, exist_ok=True)
+    fig.savefig(SVG, format="svg", bbox_inches="tight", facecolor=WOOD_BG)
+    plt.close(fig)
 
-    running_outer = PITH_RADIUS
+    years = [row["year"] for row in yearly]
+    svg_inline = inline_svg_with_years(SVG, years)
 
-    for row in yearly:
-        year = row["year"]
-        year_events = events_by_year.get(year, [])
-        n_days = 366 if calendar.isleap(year) else 365
+    year_data = year_summary(yearly, events_by_year)
+    year_data_js = json.dumps(year_data)
 
-        fine, env = year_envelope(year_events, n_days, global_max_mag)
-
-        mean_depth = (
-            sum(e["depth_km"] for e in year_events) / len(year_events)
-            if year_events else 30.0
-        )
-        colour = depth_colour(mean_depth)
-
-        base = thickness[year]
-
-        # In Plotly's polar scatter, theta is in degrees, 0 at north.
-        # A year's day d maps to angle 90 - d/n_days * 360 so Jan 1 sits at
-        # the top and the year runs clockwise, matching plot.py.
-        theta_deg = [90 - d / n_days * 360 for d in fine]
-
-        outer_r = []
-        inner_r = []
-        for i in range(CURVE_RESOLUTION):
-            spike = env[i] * SPIKE_MAX
-            half = (base + spike) / 2
-            centre = running_outer + half
-            inner_r.append(centre - half)
-            outer_r.append(centre + half)
-            # apply taiwan stretch on each angle
-            shape = taiwan_radius(math.radians(theta_deg[i]))
-            inner_r[-1] *= shape
-            outer_r[-1] *= shape
-
-        # Update running_outer to this ring's average outer edge,
-        # so the next ring hugs it.
-        running_outer = sum(outer_r) / len(outer_r)
-
-        # Close the loop
-        theta_closed = theta_deg + [theta_deg[0]]
-        outer_closed = outer_r + [outer_r[0]]
-        inner_closed = inner_r + [inner_r[0]]
-
-        # Outer boundary, going forward
-        theta_ring = theta_closed + list(reversed(theta_closed))
-        r_ring = outer_closed + list(reversed(inner_closed))
-
-        fig.add_trace(go.Scatterpolar(
-            r=r_ring,
-            theta=theta_ring,
-            fill="toself",
-            mode="lines",
-            line=dict(color="#8b6b3d", width=0.5),
-            fillcolor=colour,
-            name=str(year),
-            hoverinfo="name",
-        ))
-
-    fig.update_layout(
-        title=dict(
-            text=("Ten years of Taiwan earthquakes, as tree rings<br>"
-                  "<sub>baseline thickness = that year's energy · "
-                  "bulge = a day's magnitude (Omori decay) · "
-                  "colour = that year's mean depth</sub>"),
-            x=0.5, xanchor="center",
-        ),
-        polar=dict(
-            angularaxis=dict(
-                direction="clockwise",
-                rotation=90,
-                showticklabels=False,
-                gridcolor="#e6dcc3",
-            ),
-            radialaxis=dict(showticklabels=False, showgrid=False),
-            bgcolor="#ffffff",
-        ),
-        paper_bgcolor="#ffffff",
-        showlegend=False,
-        margin=dict(l=40, r=40, t=90, b=40),
+    year_options = "\n".join(
+        f'        <option value="{y}">{y}</option>' for y in years
     )
 
-    return fig
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ten years of Taiwan earthquakes, as tree rings</title>
+  <style>
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      background: {WOOD_BG};
+      font-family: Georgia, "Times New Roman", serif;
+      color: #4a3520;
+    }}
+    main {{
+      width: min(1180px, 100%);
+      margin: 0 auto;
+      padding: 1.5rem;
+    }}
+    h1 {{
+      font-size: clamp(1.1rem, 2vw, 1.45rem);
+      font-weight: normal;
+      text-align: center;
+      margin: 0 0 1rem;
+      line-height: 1.4;
+    }}
+    .layout {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 250px;
+      gap: 1.25rem;
+      align-items: start;
+    }}
+    .visual {{ min-width: 0; }}
+    .controls {{
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 0.65rem;
+      margin-bottom: 0.75rem;
+      font-size: 0.95rem;
+    }}
+    .controls label {{ opacity: 0.8; }}
+    .controls select {{
+      font-family: inherit;
+      font-size: 0.95rem;
+      padding: 5px 9px;
+      border: 1px solid #c8b088;
+      background: #fff;
+      color: #4a3520;
+      border-radius: 4px;
+      cursor: pointer;
+    }}
+    .figure {{ width: 100%; line-height: 0; }}
+    .figure svg {{
+      width: 100%;
+      height: auto;
+      display: block;
+    }}
+    .figure svg path {{
+      stroke-linejoin: round;
+      stroke-linecap: round;
+    }}
+    .figure svg g[data-year] {{
+      cursor: pointer;
+      transition: opacity 0.2s ease;
+    }}
+    .figure svg g[data-year].hovered {{
+      filter: drop-shadow(0 0 2px rgba(74, 53, 32, 0.45));
+    }}
+    .info-card {{
+      position: sticky;
+      top: 1.5rem;
+      padding: 1rem 1.05rem;
+      background: rgba(255, 250, 238, 0.88);
+      border: 1px solid #c8b088;
+      border-radius: 8px;
+      box-shadow: 0 5px 18px rgba(74, 53, 32, 0.08);
+      min-height: 180px;
+    }}
+    .info-card h2 {{
+      margin: 0 0 0.75rem;
+      font-size: 1.35rem;
+      font-weight: normal;
+    }}
+    .info-card .hint {{
+      margin: 0;
+      line-height: 1.55;
+      font-size: 0.88rem;
+      opacity: 0.72;
+    }}
+    .stats {{
+      display: grid;
+      gap: 0.65rem;
+      margin: 0;
+    }}
+    .stat {{
+      display: flex;
+      justify-content: space-between;
+      gap: 0.75rem;
+      border-bottom: 1px solid rgba(200, 176, 136, 0.45);
+      padding-bottom: 0.45rem;
+    }}
+    .stat:last-child {{ border-bottom: 0; }}
+    .stat dt {{ opacity: 0.72; }}
+    .stat dd {{ margin: 0; font-weight: bold; text-align: right; }}
+    .selection-note {{
+      margin: 0.8rem 0 0;
+      font-size: 0.78rem;
+      line-height: 1.45;
+      opacity: 0.7;
+    }}
+    p.note {{
+      margin: 0.75rem 0 0;
+      font-size: 0.85rem;
+      text-align: center;
+      opacity: 0.85;
+    }}
+    @media (max-width: 760px) {{
+      main {{ padding: 1rem; }}
+      .layout {{ grid-template-columns: 1fr; }}
+      .info-card {{ position: static; order: -1; min-height: 0; }}
+      .stats {{ grid-template-columns: 1fr 1fr; }}
+    }}
+    @media (max-width: 430px) {{
+      .stats {{ grid-template-columns: 1fr; }}
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Ten years of Taiwan earthquakes, as tree rings</h1>
 
+    <div class="layout">
+      <section class="visual">
+        <div class="controls">
+          <label for="year-select">Focus year:</label>
+          <select id="year-select">
+            <option value="">All years</option>
+{year_options}
+          </select>
+        </div>
 
-def main():
-    SITE.mkdir(parents=True, exist_ok=True)
-    fig = build_figure()
-    fig.write_html(OUTPUT, include_plotlyjs="cdn")
+        <div class="figure">
+          {svg_inline}
+        </div>
+
+        <p class="note">Hover over a ring to inspect that year. Choose a year to focus it.</p>
+      </section>
+
+      <aside class="info-card" id="info-card" aria-live="polite">
+        <h2 id="info-year">All years</h2>
+        <p class="hint" id="info-hint">Hover over a ring or choose a year from the menu to see its earthquake data.</p>
+        <dl class="stats" id="stats" hidden>
+          <div class="stat"><dt>Earthquakes</dt><dd id="stat-count">—</dd></div>
+          <div class="stat"><dt>Largest magnitude</dt><dd id="stat-mag">—</dd></div>
+          <div class="stat"><dt>Mean depth</dt><dd id="stat-depth">—</dd></div>
+        </dl>
+        <p class="selection-note" id="selection-note" hidden>The selected ring stays visually prominent; other years are thinned back so you can inspect its shape.</p>
+      </aside>
+    </div>
+  </main>
+
+  <script>
+    const YEAR_DATA = {year_data_js};
+    const yearSelect = document.getElementById('year-select');
+    const rings = Array.from(document.querySelectorAll('g[data-year]'));
+    const infoYear = document.getElementById('info-year');
+    const infoHint = document.getElementById('info-hint');
+    const stats = document.getElementById('stats');
+    const selectionNote = document.getElementById('selection-note');
+
+    // Save each path's original stroke width. This lets focus mode make a
+    // ring thicker/thinner without destroying the magnitude/energy encoding
+    // already present in the SVG.
+    rings.forEach(ring => {{
+      ring.querySelectorAll('path, line, polyline').forEach(el => {{
+        const width = parseFloat(el.getAttribute('stroke-width')) || parseFloat(getComputedStyle(el).strokeWidth) || 1;
+        el.dataset.baseWidth = width;
+      }});
+    }});
+
+    function setRingWidth(ring, scale) {{
+      ring.querySelectorAll('path, line, polyline').forEach(el => {{
+        const base = parseFloat(el.dataset.baseWidth);
+        if (Number.isFinite(base)) {{
+          el.style.strokeWidth = (base * scale).toFixed(3);
+        }}
+      }});
+    }}
+
+    function clearRingWidth(ring) {{
+      ring.querySelectorAll('path, line, polyline').forEach(el => {{
+        el.style.strokeWidth = '';
+      }});
+    }}
+
+    function focusYear(year) {{
+      rings.forEach(ring => {{
+        const ringYear = ring.dataset.year;
+        const active = !year || ringYear === year;
+        ring.style.opacity = active ? '1' : '0.42';
+        setRingWidth(ring, active && year ? 1.9 : (year ? 0.58 : 1));
+      }});
+    }}
+
+    function showYearInfo(year) {{
+      if (!year || !YEAR_DATA[year]) {{
+        infoYear.textContent = 'All years';
+        infoHint.hidden = false;
+        stats.hidden = true;
+        selectionNote.hidden = true;
+        return;
+      }}
+
+      const data = YEAR_DATA[year];
+      infoYear.textContent = year;
+      infoHint.hidden = true;
+      stats.hidden = false;
+      selectionNote.hidden = yearSelect.value !== year;
+      document.getElementById('stat-count').textContent = data.count;
+      document.getElementById('stat-mag').textContent = 'M ' + data.max_mag;
+      document.getElementById('stat-depth').textContent = data.mean_depth_km + ' km';
+    }}
+
+    function selectYear(year) {{
+      yearSelect.value = year || '';
+      focusYear(year || '');
+      showYearInfo(year || '');
+    }}
+
+    // Hovering temporarily emphasizes the ring and updates the fixed info card.
+    // Unlike the old mouse-following tooltip, the information stays readable
+    // while the cursor moves around the large SVG.
+    rings.forEach(ring => {{
+      ring.addEventListener('mouseenter', () => {{
+        const year = ring.dataset.year;
+        ring.classList.add('hovered');
+
+        if (yearSelect.value) {{
+          // Keep the selected year dominant, but still make the hovered ring visible.
+          if (year === yearSelect.value) {{
+            setRingWidth(ring, 2.25);
+          }} else {{
+            ring.style.opacity = '0.72';
+            setRingWidth(ring, 0.85);
+          }}
+        }} else {{
+          focusYear(year);
+          setRingWidth(ring, 1.25);
+        }}
+        showYearInfo(year);
+      }});
+
+      ring.addEventListener('mouseleave', () => {{
+        ring.classList.remove('hovered');
+        const selected = yearSelect.value;
+        focusYear(selected);
+        showYearInfo(selected || '');
+      }});
+
+      ring.addEventListener('click', () => {{
+        const year = ring.dataset.year;
+        selectYear(year);
+      }});
+    }});
+
+    yearSelect.addEventListener('change', event => {{
+      selectYear(event.target.value);
+    }});
+
+    // Initial state: all years visible, original stroke widths preserved.
+    focusYear('');
+  </script>
+</body>
+</html>
+"""
+
+    OUTPUT.write_text(html, encoding="utf-8")
     print(f"wrote {OUTPUT}")
+    print(f"wrote {SVG}")
 
 
 if __name__ == "__main__":

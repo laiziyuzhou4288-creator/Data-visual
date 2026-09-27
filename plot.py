@@ -64,7 +64,7 @@ COLOUR_CONTRAST_GAMMA = 0.4
 BLEND_SHARPNESS = 6
 COLOUR_ROUNDING_DAYS = 5
 
-CURVE_RESOLUTION = 2000
+CURVE_RESOLUTION = 800
 
 DEPTH_COLOUR_CAP_KM = 100
 
@@ -243,7 +243,8 @@ def draw_bark_rings(ax, outer_edge, base_max_radius):
                 color=BARK, linewidth=0.5, alpha=0.35, zorder=0)
 
 
-def draw(yearly, events_by_year, global_max_mag):
+def build_figure(yearly, events_by_year, global_max_mag):
+    """Build the matplotlib figure. Shared by plot.py and make_web.py."""
     base_lw = base_linewidths(yearly)
 
     fig, ax = plt.subplots(figsize=(9, 9), subplot_kw={"projection": "polar"})
@@ -321,6 +322,11 @@ def draw(yearly, events_by_year, global_max_mag):
                   "(Omori decay) · colour = nearby depth",
                   fontsize=10, pad=24)
 
+    return fig
+
+
+def draw(yearly, events_by_year, global_max_mag):
+    fig = build_figure(yearly, events_by_year, global_max_mag)
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(OUTPUT, dpi=200, bbox_inches="tight", facecolor=WOOD_BG)
     print(f"wrote {OUTPUT.name}")
