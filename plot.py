@@ -24,6 +24,9 @@ A year's baseline thickness (before any spike) also reflects that year's
 total seismic energy, so a busy year sits visibly thicker even between
 its spikes.
 
+The twelve faint radial lines mark the start of each calendar month, so a
+spike can be read as "April" or "December" instead of "day 100".
+
 Run it:
 
     uv run plot.py
@@ -34,13 +37,14 @@ written by explore.py. It never touches data/ or the network.
 
 import calendar
 import csv
+import datetime as dt
 import math
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.collections import LineCollection
-from matplotlib.colors import to_rgb
+from matplotlib.colors import to_rgb, LinearSegmentedColormap, rgb_to_hsv, hsv_to_rgb
 
 HERE = Path(__file__).parent
 YEARLY = HERE / "out" / "quakes-by-year.csv"
@@ -52,7 +56,7 @@ OUTPUT = HERE / "out" / "tree-rings.png"
 # ---------------------------------------------------------------------------
 
 PITH_RADIUS = 1.0          # radius of the empty centre, like the tree's core
-RADIAL_STEP = 1.6          # centre-to-centre distance between consecutive years
+RADIAL_STEP = 4.0          # centre-to-centre distance between consecutive years
 
 BASE_LW_MIN = 2.0          # baseline ribbon thickness (points) for the quietest year
 BASE_LW_MAX = 11.0         # baseline ribbon thickness (points) for the busiest year
@@ -61,29 +65,40 @@ SPIKE_LW_MAX = 16.0        # extra thickness (points) a full-strength spike adds
 ROUNDING_DAYS = 3          # blurs the peak tip and sawtooth into a smooth curve
 
 # Omori's law: aftershock rate ~ 1 / (t + OMORI_C) ** OMORI_P, t in days
-# since the event. Shared by both the thickness spike and the colour blend,
-# so a ribbon's bulge and its colour always agree about how "close" a day is
-# to an earthquake.
 OMORI_C = 4.0
 OMORI_P = 1.05
-COLOUR_CONTRAST_GAMMA = 0.4   # < 1 sharpens the fade to neutral -- bigger contrast,
-                               # less of a long faint tail near each event
-BLEND_SHARPNESS = 6           # how strongly the nearest event dominates the colour --
-                               # high enough that hue barely blends except right at a
-                               # crossover between two nearby events, where it eases
-                               # smoothly from one to the other instead of jumping
-COLOUR_ROUNDING_DAYS = 5      # extra smoothing pass on the finished colour itself, so
-                               # a dense year (many quakes close together) still reads
-                               # as smooth bands instead of adjacent blocks
+COLOUR_CONTRAST_GAMMA = 0.4
+BLEND_SHARPNESS = 6
+COLOUR_ROUNDING_DAYS = 5
+SATURATION_BOOST = 1.6     # >1 pushes colours back toward vivid after the blending
+                            # and smoothing above inevitably mutes them a little
 
 CURVE_RESOLUTION = 2000    # points used to draw the curve smoothly
 
-DEPTH_COLOUR_CAP_KM = 100  # depths beyond this are drawn the same colour as the cap
-CMAP = plt.get_cmap("coolwarm")   # coolwarm: shallow (low km) -> cool/blue, deep -> warm/red
-NEUTRAL_RGB = np.array(to_rgb("#e8dcc3"))   # pale wood tone a quiet day fades toward
+DEPTH_COLOUR_CAP_KM = 50   # depths beyond this are drawn the same colour as the cap --
+                            # lowered from 100: most real quakes here are under 30km,
+                            # so a lower cap spreads the common range across more of
+                            # the palette instead of bunching it all at one end
+
+# Wood-tone palette.
+# 浅层从饱和的琥珀色起步（不能太接近背景色，不然浅层地震几乎看不见），
+# 中段过渡到赭红，深层落到深棕——整条色阶从头到尾都有辨识度。
+CMAP = LinearSegmentedColormap.from_list(
+    "wood_depth",
+    ["#A56A3F",
+     "#BA9478",
+     "#F0D1A1",
+     "#99AA86",
+     "#7DA055"],
+)
+WOOD_BG = "#ffffff"                       # canvas
+NEUTRAL_RGB = np.array(to_rgb(WOOD_BG))   # quiet days fade to the same wood tone
+MONTH_LINE = "#8a7a5a"                    # twelve month dividers
+MONTH_LABEL = "#6a5a3a"                   # month names
+YEAR_LABEL = "#4a3520"                    # the year numbers
 
 # ---------------------------------------------------------------------------
-# Reading the trimmed data. fetch.py and explore.py already did the work.
+# Reading the trimmed data.
 # ---------------------------------------------------------------------------
 
 
@@ -108,9 +123,7 @@ def load_events():
 
 
 # ---------------------------------------------------------------------------
-# One shared Omori-law weight per event, per fine point on the circle --
-# used to build BOTH the thickness envelope and the colour blend, so they
-# always move together.
+# Omori-law weights, one per event per fine point on the circle.
 # ---------------------------------------------------------------------------
 
 
@@ -135,7 +148,7 @@ def event_weights(year_events, fine_days, n_days, global_max_mag):
     weights = np.empty((len(year_events), len(fine_days)))
     for idx, e in enumerate(year_events):
         peak_height = e["mag"] / global_max_mag
-        t = (fine_days - e["doy"]) % n_days   # forward-only, wraps around the circle
+        t = (fine_days - e["doy"]) % n_days
         weights[idx] = peak_height / (1 + t / OMORI_C) ** OMORI_P
     return weights
 
@@ -161,42 +174,34 @@ def year_envelope(weights, n_days, fine_days):
 def year_colours(weights, year_events, n_days):
     if weights.shape[0] == 0:
         return np.tile(NEUTRAL_RGB, (CURVE_RESOLUTION, 1))
-    event_rgb = np.array([depth_to_rgb(e["depth_km"]) for e in year_events])   # (n_events, 3)
+    event_rgb = np.array([depth_to_rgb(e["depth_km"]) for e in year_events])
 
-    # How concentrated the colour is (vs fading to the neutral tone) comes
-    # from the strongest single event at each point -- a sharp contrast
-    # between "near an earthquake" and "quiet".
     strength = weights.max(axis=0)
     alpha = np.clip(strength, 0, 1) ** COLOUR_CONTRAST_GAMMA
 
-    # Which HUE to show is a softened weighted blend across nearby events --
-    # sharpened so the closest event dominates almost completely, but not
-    # with a hard cutoff, so two overlapping sequences ease from one colour
-    # into the other across their crossover instead of jumping.
     sharp_weights = weights ** BLEND_SHARPNESS
     totals = sharp_weights.sum(axis=0)
-    totals[totals == 0] = 1   # avoid dividing by zero where nothing is nearby at all
+    totals[totals == 0] = 1
     hue_rgb = (sharp_weights.T @ event_rgb) / totals[:, None]
 
     colour = alpha[:, None] * hue_rgb + (1 - alpha[:, None]) * NEUTRAL_RGB
 
-    # A dense year packs many events close together, so the blend above can
-    # still change from one dominant event to the next every day or two --
-    # smooth the finished colour itself so it always reads as continuous
-    # bands, no matter how crowded the year is.
     samples_per_day = CURVE_RESOLUTION / n_days
     window = max(3, round(COLOUR_ROUNDING_DAYS * samples_per_day))
     for channel in range(3):
         colour[:, channel] = smooth_circular(colour[:, channel], window)
 
+    # Blending and smoothing both mute colour toward grey -- push saturation
+    # back up afterwards so the ribbon reads as vivid, not washed out.
+    hsv = rgb_to_hsv(np.clip(colour, 0, 1))
+    hsv[:, 1] = np.clip(hsv[:, 1] * SATURATION_BOOST, 0, 1)
+    colour = hsv_to_rgb(hsv)
+
     return colour
 
 
 def base_linewidths(yearly):
-    """Rank years by energy and spread them evenly across BASE_LW_MIN..MAX --
-    guarantees ten visibly different thicknesses regardless of how close (or
-    how far apart) the real energy values happen to be. Trades exact
-    proportionality for a difference you can actually see at a glance."""
+    """Rank years by energy and spread them evenly across BASE_LW_MIN..MAX."""
     ranked = sorted(yearly, key=lambda r: r["total_energy_joules"])
     n = len(ranked)
     widths = {}
@@ -207,16 +212,56 @@ def base_linewidths(yearly):
 
 
 # ---------------------------------------------------------------------------
+# Month positions.
+# ---------------------------------------------------------------------------
+
+
+def month_angles():
+    """Return [(angle_radians, name), ...] for the start of each month."""
+    names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+             "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    out = []
+    for m, name in enumerate(names, start=1):
+        doy = dt.date(2023, m, 1).timetuple().tm_yday - 1
+        angle = doy / 365 * 2 * math.pi
+        out.append((angle, name))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Drawing.
 # ---------------------------------------------------------------------------
+
+
+def draw_month_lines(ax, ring_edge_radius, label_radius):
+    for angle, name in month_angles():
+        ax.plot([angle, angle], [PITH_RADIUS, ring_edge_radius],
+                color=MONTH_LINE, linewidth=0.5, alpha=0.35, zorder=0)
+        ax.text(angle, label_radius, name,
+                ha="center", va="center", fontsize=8,
+                color=MONTH_LABEL, alpha=0.9, zorder=3)
 
 
 def draw(yearly, events_by_year, global_max_mag):
     base_lw = base_linewidths(yearly)
 
     fig, ax = plt.subplots(figsize=(9, 9), subplot_kw={"projection": "polar"})
-    ax.set_theta_zero_location("N")   # Jan 1 points straight up
-    ax.set_theta_direction(-1)        # the year runs clockwise, like a clock face
+    ax.set_theta_zero_location("N")
+    ax.set_theta_direction(-1)
+    ax.set_facecolor(WOOD_BG)
+    fig.patch.set_facecolor(WOOD_BG)
+
+    # The outermost ring's own line can visually render much wider than its
+    # data-radius position suggests (linewidth is in points, not data
+    # units), so the label needs a generous margin -- not just a hair
+    # beyond the last ring's centre -- or it still reads as crowded.
+    outer_ring_radius = PITH_RADIUS + RADIAL_STEP * len(yearly)
+    ring_edge_radius = outer_ring_radius + 1.2
+    label_radius = outer_ring_radius + 2.4
+    max_radius = label_radius + 0.6
+
+    # Month dividers first, so they sit under the ribbons.
+    draw_month_lines(ax, ring_edge_radius, label_radius)
 
     for i, row in enumerate(yearly):
         year = row["year"]
@@ -234,7 +279,7 @@ def draw(yearly, events_by_year, global_max_mag):
         centre_radius = PITH_RADIUS + RADIAL_STEP / 2 + i * RADIAL_STEP
         theta = fine_days / n_days * 2 * math.pi
         points = np.column_stack([theta, np.full(CURVE_RESOLUTION, centre_radius)])
-        points = np.vstack([points, points[0]])   # close the loop, no seam at year end
+        points = np.vstack([points, points[0]])
         segments = np.stack([points[:-1], points[1:]], axis=1)
 
         seg_colours = np.vstack([colours, colours[0]])[:-1]
@@ -245,16 +290,14 @@ def draw(yearly, events_by_year, global_max_mag):
         ax.add_collection(ring)
 
         ax.text(math.pi, centre_radius, str(year), ha="center", va="center",
-                fontsize=8, color="#4a3520",
-                bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.75, "pad": 1.5})
+                fontsize=8, color=YEAR_LABEL,
+                bbox={"facecolor": WOOD_BG, "edgecolor": "none", "alpha": 0.85, "pad": 1.5})
 
-    max_radius = PITH_RADIUS + RADIAL_STEP * len(yearly) + 0.6
     ax.set_ylim(0, max_radius)
     ax.set_yticklabels([])
     ax.set_xticklabels([])
     ax.spines["polar"].set_visible(False)
     ax.grid(False)
-    ax.set_facecolor("white")
 
     sm = plt.cm.ScalarMappable(cmap=CMAP, norm=plt.Normalize(vmin=0, vmax=DEPTH_COLOUR_CAP_KM))
     sm.set_array([])
@@ -267,7 +310,7 @@ def draw(yearly, events_by_year, global_max_mag):
                   fontsize=10, pad=24)
 
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(OUTPUT, dpi=200, bbox_inches="tight")
+    fig.savefig(OUTPUT, dpi=200, bbox_inches="tight", facecolor=WOOD_BG)
     print(f"wrote {OUTPUT.name}")
     plt.show()
 
