@@ -10,22 +10,13 @@ continuously -- both driven by the same underlying signal: how much seismic
 disturbance is "in the air" on any given day.
 
 That signal follows Omori's law: real aftershock rates decay roughly as
-1 / (t + c)^p after a main shock, t in days -- a fast rise on the day
-itself, a long, slowly flattening tail. Here it drives two things from the
-same source, so they always agree with each other:
+1 / (t + c)^p after a main shock, t in days.
 
-  - the ribbon's THICKNESS swells around its centre line near a big day,
-    fattest on the day itself, tapering back to a thin resting line
-  - the ribbon's COLOUR blends toward that day's depth the same way -- an
-    earthquake's colour "bleeds" into the days around it and fades out,
-    instead of switching abruptly from one day to the next
+A year's baseline thickness reflects that year's total seismic energy. A
+year's centre line is also nudged outward wherever the previous year bulged.
+The nudge decays year by year and is recentred.
 
-A year's baseline thickness (before any spike) also reflects that year's
-total seismic energy, so a busy year sits visibly thicker even between
-its spikes.
-
-The twelve faint radial lines mark the start of each calendar month, so a
-spike can be read as "April" or "December" instead of "day 100".
+The whole thing is squashed into a rough Taiwan silhouette.
 
 Run it:
 
@@ -44,7 +35,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.collections import LineCollection
-from matplotlib.colors import to_rgb, LinearSegmentedColormap, rgb_to_hsv, hsv_to_rgb
+from matplotlib.colors import to_rgb, LinearSegmentedColormap
 
 HERE = Path(__file__).parent
 YEARLY = HERE / "out" / "quakes-by-year.csv"
@@ -55,47 +46,63 @@ OUTPUT = HERE / "out" / "tree-rings.png"
 # The knobs.
 # ---------------------------------------------------------------------------
 
-PITH_RADIUS = 1.0          # radius of the empty centre, like the tree's core
-RADIAL_STEP = 4.0          # centre-to-centre distance between consecutive years
+PITH_RADIUS = 1.0
+RADIAL_STEP = 3.0
 
-BASE_LW_MIN = 2.0          # baseline ribbon thickness (points) for the quietest year
-BASE_LW_MAX = 11.0         # baseline ribbon thickness (points) for the busiest year
-SPIKE_LW_MAX = 16.0        # extra thickness (points) a full-strength spike adds on top
+BASE_LW_MIN = 2.0
+BASE_LW_MAX = 11.0
+SPIKE_LW_MAX = 16.0
 
-ROUNDING_DAYS = 3          # blurs the peak tip and sawtooth into a smooth curve
+GROWTH_DECAY = 0.4
+GROWTH_TRANSFER = 0.08
 
-# Omori's law: aftershock rate ~ 1 / (t + OMORI_C) ** OMORI_P, t in days
+ROUNDING_DAYS = 3
+
 OMORI_C = 4.0
 OMORI_P = 1.05
 COLOUR_CONTRAST_GAMMA = 0.4
 BLEND_SHARPNESS = 6
 COLOUR_ROUNDING_DAYS = 5
-SATURATION_BOOST = 1.6     # >1 pushes colours back toward vivid after the blending
-                            # and smoothing above inevitably mutes them a little
 
-CURVE_RESOLUTION = 2000    # points used to draw the curve smoothly
+CURVE_RESOLUTION = 2000
 
-DEPTH_COLOUR_CAP_KM = 50   # depths beyond this are drawn the same colour as the cap --
-                            # lowered from 100: most real quakes here are under 30km,
-                            # so a lower cap spreads the common range across more of
-                            # the palette instead of bunching it all at one end
+DEPTH_COLOUR_CAP_KM = 100
 
-# Wood-tone palette.
-# 浅层从饱和的琥珀色起步（不能太接近背景色，不然浅层地震几乎看不见），
-# 中段过渡到赭红，深层落到深棕——整条色阶从头到尾都有辨识度。
 CMAP = LinearSegmentedColormap.from_list(
     "wood_depth",
-    ["#A56A3F",
-     "#BA9478",
-     "#F0D1A1",
-     "#99AA86",
-     "#7DA055"],
+    ["#8d9e5b",
+     "#c0c971",
+     "#e8d376",
+     "#a7670c",
+     "#811901"],
 )
-WOOD_BG = "#ffffff"                       # canvas
-NEUTRAL_RGB = np.array(to_rgb(WOOD_BG))   # quiet days fade to the same wood tone
-MONTH_LINE = "#8a7a5a"                    # twelve month dividers
-MONTH_LABEL = "#6a5a3a"                   # month names
-YEAR_LABEL = "#4a3520"                    # the year numbers
+WOOD_BG = "#ffffff"
+NEUTRAL_RGB = np.array(to_rgb("#f0e2c8"))
+MONTH_LINE = "#8a7a5a"
+MONTH_LABEL = "#6a5a3a"
+YEAR_LABEL = "#4a3520"
+BARK = "#c8b088"
+
+# Taiwan silhouette (gentle so nothing gets clipped).
+TAIWAN_SHAPE = {
+    0:             1.00,   # N
+    math.pi / 4:   1.06,   # NE
+    math.pi / 2:   1.15,   # E
+    3 * math.pi / 4: 1.08, # SE
+    math.pi:       1.20,   # S
+    5 * math.pi / 4: 1.03, # SW
+    3 * math.pi / 2: 0.97, # W
+    7 * math.pi / 4: 0.97, # NW
+}
+
+
+def taiwan_radius(theta):
+    angles = sorted(TAIWAN_SHAPE.keys())
+    radii = [TAIWAN_SHAPE[a] for a in angles]
+    angles_ext = angles + [a + 2 * math.pi for a in angles]
+    radii_ext = radii + radii
+    return float(np.interp(theta, angles_ext, radii_ext))
+
 
 # ---------------------------------------------------------------------------
 # Reading the trimmed data.
@@ -123,13 +130,11 @@ def load_events():
 
 
 # ---------------------------------------------------------------------------
-# Omori-law weights, one per event per fine point on the circle.
+# Omori-law weights.
 # ---------------------------------------------------------------------------
 
 
 def smooth_circular(values, window):
-    """A Gaussian-weighted average that wraps around, so the smoothing has
-    no seam where the ring closes on itself."""
     sigma = window / 3
     half = max(1, window * 2)
     offsets = np.arange(-half, half + 1)
@@ -141,8 +146,6 @@ def smooth_circular(values, window):
 
 
 def event_weights(year_events, fine_days, n_days, global_max_mag):
-    """One Omori-decay curve per event, each scaled by that event's
-    magnitude. Shape: (n_events, CURVE_RESOLUTION)."""
     if not year_events:
         return np.zeros((0, len(fine_days)))
     weights = np.empty((len(year_events), len(fine_days)))
@@ -156,11 +159,6 @@ def event_weights(year_events, fine_days, n_days, global_max_mag):
 def depth_to_rgb(depth_km):
     fraction = min(depth_km, DEPTH_COLOUR_CAP_KM) / DEPTH_COLOUR_CAP_KM
     return np.array(CMAP(fraction)[:3])
-
-
-# ---------------------------------------------------------------------------
-# Turning a year's earthquakes into a thickness envelope and a colour blend.
-# ---------------------------------------------------------------------------
 
 
 def year_envelope(weights, n_days, fine_days):
@@ -191,17 +189,10 @@ def year_colours(weights, year_events, n_days):
     for channel in range(3):
         colour[:, channel] = smooth_circular(colour[:, channel], window)
 
-    # Blending and smoothing both mute colour toward grey -- push saturation
-    # back up afterwards so the ribbon reads as vivid, not washed out.
-    hsv = rgb_to_hsv(np.clip(colour, 0, 1))
-    hsv[:, 1] = np.clip(hsv[:, 1] * SATURATION_BOOST, 0, 1)
-    colour = hsv_to_rgb(hsv)
-
     return colour
 
 
 def base_linewidths(yearly):
-    """Rank years by energy and spread them evenly across BASE_LW_MIN..MAX."""
     ranked = sorted(yearly, key=lambda r: r["total_energy_joules"])
     n = len(ranked)
     widths = {}
@@ -211,13 +202,7 @@ def base_linewidths(yearly):
     return widths
 
 
-# ---------------------------------------------------------------------------
-# Month positions.
-# ---------------------------------------------------------------------------
-
-
 def month_angles():
-    """Return [(angle_radians, name), ...] for the start of each month."""
     names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
     out = []
@@ -233,13 +218,29 @@ def month_angles():
 # ---------------------------------------------------------------------------
 
 
-def draw_month_lines(ax, ring_edge_radius, label_radius):
+def draw_month_lines(ax, base_max_radius):
+    """base_max_radius is the un-squashed radius; each line stretches by
+    taiwan_radius(angle) itself."""
     for angle, name in month_angles():
-        ax.plot([angle, angle], [PITH_RADIUS, ring_edge_radius],
+        shape = taiwan_radius(angle)
+        ax.plot([angle, angle], [PITH_RADIUS, base_max_radius * shape* 1.08],
                 color=MONTH_LINE, linewidth=0.5, alpha=0.35, zorder=0)
-        ax.text(angle, label_radius, name,
-                ha="center", va="center", fontsize=8,
-                color=MONTH_LABEL, alpha=0.9, zorder=3)
+        ax.text(angle, base_max_radius * shape * 1.10, name,
+                ha="center", va="center", fontsize=7,
+                color=MONTH_LABEL, alpha=0.85, zorder=3)
+
+
+def draw_bark_rings(ax, outer_edge, base_max_radius):
+    bark_gap = 0.18
+    bark_count = 5
+    full_circle = np.linspace(0, 2 * math.pi, 400)
+    shape = np.array([taiwan_radius(t) for t in full_circle])
+    for k in range(1, bark_count + 1):
+        r = outer_edge + k * bark_gap
+        if r >= base_max_radius - 0.05:
+            break
+        ax.plot(full_circle, r * shape,
+                color=BARK, linewidth=0.5, alpha=0.35, zorder=0)
 
 
 def draw(yearly, events_by_year, global_max_mag):
@@ -251,17 +252,15 @@ def draw(yearly, events_by_year, global_max_mag):
     ax.set_facecolor(WOOD_BG)
     fig.patch.set_facecolor(WOOD_BG)
 
-    # The outermost ring's own line can visually render much wider than its
-    # data-radius position suggests (linewidth is in points, not data
-    # units), so the label needs a generous margin -- not just a hair
-    # beyond the last ring's centre -- or it still reads as crowded.
-    outer_ring_radius = PITH_RADIUS + RADIAL_STEP * len(yearly)
-    ring_edge_radius = outer_ring_radius + 1.2
-    label_radius = outer_ring_radius + 2.4
-    max_radius = label_radius + 0.6
+    # Un-squashed radius for the axes; the plotted limit is the squashed one,
+    # so the bulging direction still fits inside the frame.
+    base_max_radius = 30.0   # 固定值，不跟 RADIAL_STEP 变
+    max_shape = max(TAIWAN_SHAPE.values())
+    max_radius = base_max_radius * max_shape
 
-    # Month dividers first, so they sit under the ribbons.
-    draw_month_lines(ax, ring_edge_radius, label_radius)
+    draw_month_lines(ax, base_max_radius)
+
+    cumulative_offset = np.zeros(CURVE_RESOLUTION)
 
     for i, row in enumerate(yearly):
         year = row["year"]
@@ -273,12 +272,17 @@ def draw(yearly, events_by_year, global_max_mag):
         envelope = year_envelope(weights, n_days, fine_days)
         colours = year_colours(weights, year_events, n_days)
 
-        fraction = np.clip(envelope, 0, 1)
-        linewidths = base_lw[year] + fraction * SPIKE_LW_MAX
-
-        centre_radius = PITH_RADIUS + RADIAL_STEP / 2 + i * RADIAL_STEP
         theta = fine_days / n_days * 2 * math.pi
-        points = np.column_stack([theta, np.full(CURVE_RESOLUTION, centre_radius)])
+        shape = np.array([taiwan_radius(t) for t in theta])
+
+        fraction = np.clip(envelope, 0, 1)
+        linewidths = (base_lw[year] + fraction * SPIKE_LW_MAX) * shape
+
+        base_radius = PITH_RADIUS + RADIAL_STEP / 2 + i * RADIAL_STEP
+        centre_radius = base_radius + cumulative_offset
+        centre_radius = centre_radius * shape
+
+        points = np.column_stack([theta, centre_radius])
         points = np.vstack([points, points[0]])
         segments = np.stack([points[:-1], points[1:]], axis=1)
 
@@ -289,9 +293,17 @@ def draw(yearly, events_by_year, global_max_mag):
                               capstyle="butt", joinstyle="round", zorder=1)
         ax.add_collection(ring)
 
-        ax.text(math.pi, centre_radius, str(year), ha="center", va="center",
+        label_radius = float(np.mean(centre_radius))
+        ax.text(math.pi, label_radius, str(year), ha="center", va="center",
                 fontsize=8, color=YEAR_LABEL,
                 bbox={"facecolor": WOOD_BG, "edgecolor": "none", "alpha": 0.85, "pad": 1.5})
+
+        cumulative_offset = (cumulative_offset * GROWTH_DECAY
+                             + envelope * (RADIAL_STEP * GROWTH_TRANSFER))
+        cumulative_offset -= np.mean(cumulative_offset)
+
+    outer_edge = base_max_radius - 1.4
+    draw_bark_rings(ax, outer_edge, base_max_radius)
 
     ax.set_ylim(0, max_radius)
     ax.set_yticklabels([])
