@@ -1,6 +1,6 @@
-# Ten years of Taiwan earthquakes, as tree rings
+# Ten years of Taiwan earthquakes in annual rings
 
-![ten years of Taiwan earthquakes as tree rings](out/tree-rings.png)
+![ten years of Taiwan earthquakes in annual rings](out/annual-rings.png)
 
 ## The phenomenon
 

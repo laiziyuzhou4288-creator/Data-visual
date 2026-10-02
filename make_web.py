@@ -4,7 +4,7 @@
 # ///
 
 """
-Build the interactive HTML page for the Taiwan earthquake tree rings.
+Build the interactive HTML page for the Taiwan earthquake trees growth rings.
 
 Run it:
 
@@ -53,7 +53,7 @@ from plot import WOOD_BG, build_figure, load_events, load_yearly
 HERE = Path(__file__).parent
 SITE = HERE / "site"
 OUTPUT = SITE / "index.html"
-SVG = SITE / "tree-rings.svg"
+SVG = SITE / "annual-rings.svg"
 
 # Redraw at a coarser resolution just for the web page -- the Gaussian
 # smoothing already in plot.py means this loses no visible detail, only
@@ -192,7 +192,7 @@ def main():
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Ten years of Taiwan earthquakes, as tree rings</title>
+  <title>Ten years of Taiwan earthquakes in annual rings</title>
   <style>
     * {{ box-sizing: border-box; }}
     [hidden] {{ display: none !important; }}   /* .stats sets display:grid, which otherwise beats the hidden attribute */
@@ -322,7 +322,7 @@ def main():
 </head>
 <body>
   <main>
-    <h1>Ten years of Taiwan earthquakes, as tree rings</h1>
+    <h1>Ten years of Taiwan earthquakes in annual rings</h1>
 
     <div class="layout">
       <section class="visual">

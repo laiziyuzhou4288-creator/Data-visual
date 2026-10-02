@@ -4,7 +4,7 @@
 # ///
 
 """
-Draw ten years of Taiwan earthquakes as tree rings, each ring a wavy ribbon
+Draw ten years of Taiwan earthquakes as trees growth rings, each ring a wavy ribbon
 that thickens symmetrically around its own centre line and shifts colour
 continuously -- both driven by the same underlying signal: how much seismic
 disturbance is "in the air" on any given day.
@@ -40,7 +40,7 @@ from matplotlib.colors import to_rgb, LinearSegmentedColormap
 HERE = Path(__file__).parent
 YEARLY = HERE / "out" / "quakes-by-year.csv"
 EVENTS = HERE / "out" / "quakes-events.csv"
-OUTPUT = HERE / "out" / "tree-rings.png"
+OUTPUT = HERE / "out" / "annual-rings.png"
 
 # ---------------------------------------------------------------------------
 # The knobs.
@@ -294,7 +294,8 @@ def build_figure(yearly, events_by_year, global_max_mag):
                               capstyle="butt", joinstyle="round", zorder=1)
         ax.add_collection(ring)
 
-        label_radius = float(np.mean(centre_radius))
+        label_idx = int(np.argmin(np.abs(theta - math.pi)))
+        label_radius = float(centre_radius[label_idx])
         ax.text(math.pi, label_radius, str(year), ha="center", va="center",
                 fontsize=8, color=YEAR_LABEL,
                 bbox={"facecolor": WOOD_BG, "edgecolor": "none", "alpha": 0.85, "pad": 1.5})
@@ -317,7 +318,7 @@ def build_figure(yearly, events_by_year, global_max_mag):
     cbar = fig.colorbar(sm, ax=ax, fraction=0.035, pad=0.08)
     cbar.set_label(f"depth (km, capped at {DEPTH_COLOUR_CAP_KM})", fontsize=8)
 
-    ax.set_title("Ten years of Taiwan earthquakes, as tree rings\n"
+    ax.set_title("Ten years of Taiwan earthquakes in annual rings\n"
                   "baseline thickness = that year's energy · bulge = a day's magnitude "
                   "(Omori decay) · colour = nearby depth",
                   fontsize=10, pad=24)
