@@ -66,15 +66,15 @@ COLOUR_ROUNDING_DAYS = 5
 
 CURVE_RESOLUTION = 800
 
-DEPTH_COLOUR_CAP_KM = 100
+DEPTH_COLOUR_CAP_KM = 50
 
 CMAP = LinearSegmentedColormap.from_list(
-    "wood_depth",
-    ["#8d9e5b",
-     "#c0c971",
-     "#e8d376",
-     "#a7670c",
-     "#811901"],
+    "depth",
+    ["#B02626",   # 0 km   (shallow): strong muted red
+     "#DF7E5E",   # 40 km: warm orange
+     "#DCE58D",   # 60 km: muted sand
+     "#AFC69A",   # 80 km: soft sage
+     "#4F9664"],  # 100 km (deep): muted teal
 )
 WOOD_BG = "#ffffff"
 NEUTRAL_RGB = np.array(to_rgb("#f0e2c8"))
