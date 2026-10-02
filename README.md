@@ -1,10 +1,10 @@
-# Ten years of Taiwan earthquakes in annual rings
-
-![ten years of Taiwan earthquakes in annual rings](out/annual-rings.png)
-
 ## Live page
 
 <https://laiziyuzhou4288-creator.github.io/Ten-years-of-Taiwan-earthquakes-in-annual-rings/>
+
+# Ten years of Taiwan earthquakes in annual rings
+
+![ten years of Taiwan earthquakes in annual rings](out/annual-rings.png)
 
 ## The phenomenon
 
